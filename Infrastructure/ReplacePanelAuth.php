@@ -2,6 +2,7 @@
 
 namespace App\Services\ApiKey\Infrastructure;
 
+use App\Http\Middleware\AuthGuest;
 use App\Http\Middleware\AuthWithJWT;
 use App\Http\Middleware\DomainAccess;
 use App\Http\Middleware\IpTrust;
@@ -29,7 +30,8 @@ final class ReplacePanelAuth
         }
 
         $route = $event->route;
-        $route->withoutMiddleware([DomainAccess::class, IpTrust::class, AuthWithJWT::class]);
+        // AuthGuest هم کنار می‌رود: بدون آن route هدر Bearer را مستقیم به AuthWithJWT می‌داد و کلید را رد می‌کرد
+        $route->withoutMiddleware([DomainAccess::class, IpTrust::class, AuthWithJWT::class, AuthGuest::class]);
 
         $action = $route->getAction();
         $middleware = array_values((array) ($action['middleware'] ?? []));

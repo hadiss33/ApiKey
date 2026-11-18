@@ -3,7 +3,9 @@
 namespace App\Services\ApiKey\Application\Services;
 
 use App\Services\ApiKey\Application\Contracts\ApiKeyStore;
+use App\Services\ApiKey\Application\Contracts\OperatorDirectory;
 use App\Services\ApiKey\Application\DTOs\ApiKeyRecord;
+use App\Services\ApiKey\Application\DTOs\PreparedKey;
 use App\Services\ApiKey\Domain\ApiKeyException;
 use App\Services\ApiKey\Domain\ApiKeyRules;
 use Carbon\Carbon;
@@ -13,20 +15,28 @@ use Illuminate\Support\Facades\Log;
 /**
  * مدیریت کلیدها (ساخت، ویرایش، چرخش، باطل‌کردن) و بررسی کلید در هر درخواست.
  *
- * بررسی درخواست (authenticate) به این ترتیب: وجود کلید ← باطل نشده ← منقضی نشده ← IP/دامنه ← دسترسی.
- * سه حالت اول عمداً یک خطا می‌دهند (unauthenticated) تا علت افشا نشود. سقف درخواست در میدلور است.
+ * authenticate → PreparedKey (رکورد + قانون‌های جمع‌شده‌ی دسته‌ها + اپراتور پاک‌سازی‌شده).
+ * همه با هم کش می‌شوند؛ هر درخواست فقط یک خواندن از Redis (بدون query به دیتابیس).
  *
- * ورودی‌ها قبلاً با FormRequest شکل‌شان بررسی شده؛ اینجا قانون‌های کسب‌وکار بررسی می‌شوند
- * (دسترسی‌ها با config، یکتایی دامنه، سقف کلید شعبه، ...).
+ * اپراتور پاک‌سازی‌شده: بدون ستون‌های حساس، is_admin=0، شعبه از کلید (نه از اپراتور سازنده).
+ * قدرت واقعی کلید = min(دسترسی کلید، دسترسی اپراتور سازنده) چون کد قدیمی روی همان ردیف operator کار می‌کند.
  */
 final class ApiKeyService
 {
     private const MAX_ORIGINS = 20;
     private const MAX_IPS = 50;
 
+    // ستون‌هایی که از اپراتور سازنده در هویت کلید نمایش داده نمی‌شوند
+    private const SENSITIVE_OPERATOR_COLUMNS = [
+        'password', 'remember_token', 'token', 'api_token',
+        'otp', 'otp_issuing', 'two_factor_secret', 'two_factor_recovery_codes',
+        'secret', 'private_key', 'refresh_token',
+    ];
+
     public function __construct(
         private readonly ApiKeyStore $store,
         private readonly CategoryRegistry $categories,
+        private readonly OperatorDirectory $operators,
     ) {}
 
     // ───────────────────────── پنل ─────────────────────────
@@ -45,8 +55,7 @@ final class ApiKeyService
     /**
      * ساخت کلید؛ کلید خام فقط در plainKey رکورد برگشتی است.
      *
-     * @param  array<string, mixed>  $data  name, description, type, environment, grants ({"دسته": ["read","write"]}), preset,
-     *                                      allowed_ips, origins, rate_limit_per_minute, expires_at, no_expiry
+     * @param  array<string, mixed>  $data  name, description, type, environment, categories (int[]), allowed_ips, origins, rate_limit_per_minute, expires_at, no_expiry
      */
     public function issue(int $branchId, int $operatorId, array $data): ApiKeyRecord
     {
@@ -60,7 +69,7 @@ final class ApiKeyService
             throw ApiKeyException::invalid('api_key.errors.max_keys', null, ['max' => $max]);
         }
 
-        $grants = $this->categories->validateGrants((array) ($data['grants'] ?? []), $data['preset'] ?? null, $public);
+        $categoryIds = $this->categories->validateCategoryIds((array) ($data['categories'] ?? []), $branchId, $public);
         $origins = $this->origins((array) ($data['origins'] ?? []), $public, null);
         $prefix = ApiKeyRules::prefixFor($type, $environment, (array) config('api_key.prefixes', []));
         $plain = ApiKeyRules::generate($prefix, (int) config('api_key.key_length', 40));
@@ -77,12 +86,12 @@ final class ApiKeyService
             'rate_limit_per_minute' => $this->rateLimit($data['rate_limit_per_minute'] ?? null),
             'expires_at' => $this->expiry($data, true),
             'created_by' => $operatorId,
-        ], $grants, $origins);
+        ], $categoryIds, $origins);
 
         return $record->withPlainKey($plain);
     }
 
-    /** ویرایش (نوع و محیط قابل تغییر نیستند). فقط فیلدهای آمده تغییر می‌کنند. */
+    /** ویرایش (نوع و محیط قابل تغییر نیستند). */
     public function update(int $branchId, int $id, int $operatorId, array $data): ApiKeyRecord
     {
         $current = $this->requireNotRevoked($branchId, $id);
@@ -104,28 +113,24 @@ final class ApiKeyService
             $attributes['rate_limit_per_minute'] = $this->rateLimit($data['rate_limit_per_minute']);
         }
 
-        // فقط با تاریخ جدید یا no_expiry=true تغییر می‌کند (no_expiry=false بدون تاریخ = بدون تغییر)
         if (! empty($data['expires_at']) || ! empty($data['no_expiry'])) {
             $attributes['expires_at'] = $this->expiry($data, false);
         }
 
-        $grants = array_key_exists('grants', $data) || array_key_exists('preset', $data)
-            ? $this->categories->validateGrants((array) ($data['grants'] ?? []), $data['preset'] ?? null, $current->isPublic())
+        $categoryIds = array_key_exists('categories', $data)
+            ? $this->categories->validateCategoryIds((array) ($data['categories'] ?? []), $branchId, $current->isPublic())
             : null;
 
         $origins = array_key_exists('origins', $data)
             ? $this->origins((array) ($data['origins'] ?? []), $current->isPublic(), $current->id)
             : null;
 
-        $record = $this->store->update($current->id, $attributes, $grants, $origins);
+        $record = $this->store->update($current->id, $attributes, $categoryIds, $origins);
         $this->forget($current);
 
         return $record;
     }
 
-    /**
-     * کلید تازه روی همان ردیف (هویت ثابت). کلید قبلی تا $graceHours ساعت دیگر هم پذیرفته می‌شود (۰ = فوراً باطل).
-     */
     public function rotate(int $branchId, int $id, int $operatorId, ?int $graceHours): ApiKeyRecord
     {
         $current = $this->requireNotRevoked($branchId, $id);
@@ -153,7 +158,6 @@ final class ApiKeyService
         return $record->withPlainKey($plain);
     }
 
-    /** باطل‌کردن فوری. ردیف برای سوابق می‌ماند؛ دامنه‌هایش آزاد می‌شوند. */
     public function revoke(int $branchId, int $id, int $operatorId): ApiKeyRecord
     {
         $current = $this->requireNotRevoked($branchId, $id);
@@ -173,24 +177,26 @@ final class ApiKeyService
     // ───────────────────────── بررسی درخواست ─────────────────────────
 
     /**
-     * هویت کلید: وجود، باطل/منقضی نبودن، IP و Origin مجاز. «دسترسی به route» جدا و با
-     * CategoryRegistry::authorize بررسی می‌شود (ApiKeyAuth هر دو را به این ترتیب صدا می‌زند).
+     * بررسی کامل کلید: هویت + IP/Origin + ساخت PreparedKey (رکورد + قانون‌ها + اپراتور پاک).
+     * همه با هم کش می‌شوند؛ بدون query اضافه در هر درخواست.
      *
-     * @throws ApiKeyException unauthenticated | sourceDenied
+     * @throws ApiKeyException unauthenticated | sourceDenied | creatorInactive
      */
-    public function authenticate(string $plainKey, ?string $ip, ?string $origin): ApiKeyRecord
+    public function authenticate(string $plainKey, ?string $ip, ?string $origin): PreparedKey
     {
         $hash = $this->store->hash($plainKey);
         $ttl = max(0, (int) config('api_key.cache_seconds', 60));
-        $record = $ttl > 0
-            ? Cache::remember($this->cacheKey($hash), $ttl, fn () => $this->store->findByHash($hash))
-            : $this->store->findByHash($hash);
+        $cacheKey = $this->cacheKey($hash);
 
-        if (! $record instanceof ApiKeyRecord) {
+        $prepared = $ttl > 0
+            ? Cache::remember($cacheKey, $ttl, fn () => $this->buildPrepared($hash))
+            : $this->buildPrepared($hash);
+
+        if (! $prepared instanceof PreparedKey) {
             throw ApiKeyException::unauthenticated();
         }
 
-        // کلید قبلی (بعد از چرخش) فقط تا پایان مهلت
+        $record = $prepared->record;
         $now = now();
         $viaPrevious = ! hash_equals($record->keyHash, $hash);
 
@@ -207,7 +213,6 @@ final class ApiKeyService
             throw ApiKeyException::sourceDenied();
         }
 
-        // کلید عمومی فقط از دامنه‌های ثبت‌شده (Origin مرورگر)
         if ($record->isPublic()) {
             $normalized = $origin !== null ? ApiKeyRules::normalizeOrigin($origin) : null;
 
@@ -216,10 +221,14 @@ final class ApiKeyService
             }
         }
 
-        return $record;
+        // اپراتور سازنده باید فعال باشد (از کش آمد؛ چک نهایی)
+        if (! isset($prepared->sanitizedOperator->id)) {
+            throw ApiKeyException::creatorInactive();
+        }
+
+        return $prepared;
     }
 
-    /** ثبت آخرین استفاده؛ حداکثر هر touch_every_seconds یک‌بار برای هر کلید. شکستش درخواست را متوقف نمی‌کند. */
     public function touch(ApiKeyRecord $record, ?string $ip): void
     {
         try {
@@ -234,6 +243,48 @@ final class ApiKeyService
     }
 
     // ───────────────────────── کمکی ─────────────────────────
+
+    /**
+     * ساخت PreparedKey از DB؛ نتیجه کش می‌شود.
+     * اگر کلید پیدا نشود، کش نمی‌شود تا IP ban کار کند.
+     */
+    private function buildPrepared(string $hash): ?PreparedKey
+    {
+        $record = $this->store->findByHash($hash);
+
+        if (! $record instanceof ApiKeyRecord) {
+            return null;
+        }
+
+        $operator = $this->operators->activeOperator($record->createdBy);
+
+        if ($operator === null) {
+            return null; // اپراتور سازنده غیرفعال = کلید کار نمی‌کند
+        }
+
+        $sanitized = $this->sanitizeOperator($operator, $record->branchId);
+        $aggregatedRules = $this->categories->buildAggregatedRules($record->categoryIds);
+
+        return new PreparedKey($record, $aggregatedRules, $sanitized);
+    }
+
+    /**
+     * اپراتور پاک‌سازی‌شده: بدون ستون‌های حساس، is_admin=0، شعبه از کلید.
+     */
+    private function sanitizeOperator(object $operator, int $keyBranchId): object
+    {
+        $data = (array) $operator;
+
+        foreach (self::SENSITIVE_OPERATOR_COLUMNS as $col) {
+            unset($data[$col]);
+        }
+
+        $data['is_admin'] = 0;
+        $data['branch_id'] = $keyBranchId;
+        $data['office_id'] = $keyBranchId;
+
+        return (object) $data;
+    }
 
     private function requireNotRevoked(int $branchId, int $id): ApiKeyRecord
     {
@@ -337,7 +388,6 @@ final class ApiKeyService
         return $value;
     }
 
-    /** انقضا: no_expiry ← null؛ تاریخ داده‌شده (باید آینده باشد)؛ در ساخت بدون هر دو ← پیش‌فرض config */
     private function expiry(array $data, bool $creating): ?Carbon
     {
         if (! empty($data['no_expiry'])) {

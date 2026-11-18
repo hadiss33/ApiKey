@@ -13,7 +13,7 @@ use DateTimeInterface;
 final class ApiKeyRecord
 {
     /**
-     * @param  array<int, array<int, int>>  $grants  شناسه‌ی دسته (از config) ← سطح‌ها (1=read، 2=write)
+     * @param  array<int, int>  $categoryIds  شناسه‌های دسته‌هایی که این کلید به آن‌ها وصل است (از api_key_category_keys)
      * @param  array<int, string>  $allowedIps
      * @param  array<int, string>  $origins
      */
@@ -28,7 +28,7 @@ final class ApiKeyRecord
         public readonly string $keyHash,
         public readonly ?string $previousKeyHash,
         public readonly ?DateTimeInterface $previousKeyExpiresAt,
-        public readonly array $grants,
+        public readonly array $categoryIds,
         public readonly array $allowedIps,
         public readonly array $origins,
         public readonly ?int $rateLimitPerMinute,
@@ -57,10 +57,32 @@ final class ApiKeyRecord
     /** همین رکورد به‌همراه کلید خام (فقط برای پاسخ ساخت/چرخش) */
     public function withPlainKey(string $plainKey): self
     {
-        $values = get_object_vars($this);
-        $values['plainKey'] = $plainKey;
-
-        return new self(...$values);
+        return new self(
+            id: $this->id,
+            branchId: $this->branchId,
+            name: $this->name,
+            description: $this->description,
+            type: $this->type,
+            environment: $this->environment,
+            prefix: $this->prefix,
+            keyHash: $this->keyHash,
+            previousKeyHash: $this->previousKeyHash,
+            previousKeyExpiresAt: $this->previousKeyExpiresAt,
+            categoryIds: $this->categoryIds,
+            allowedIps: $this->allowedIps,
+            origins: $this->origins,
+            rateLimitPerMinute: $this->rateLimitPerMinute,
+            expiresAt: $this->expiresAt,
+            lastUsedAt: $this->lastUsedAt,
+            lastUsedIp: $this->lastUsedIp,
+            createdBy: $this->createdBy,
+            updatedBy: $this->updatedBy,
+            rotatedAt: $this->rotatedAt,
+            revokedAt: $this->revokedAt,
+            revokedBy: $this->revokedBy,
+            createdAt: $this->createdAt,
+            plainKey: $plainKey,
+        );
     }
 
     /** هویت برای ثبت در رکورد سرویس‌ها */

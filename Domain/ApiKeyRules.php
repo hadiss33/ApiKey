@@ -34,6 +34,15 @@ final class ApiKeyRules
         return in_array(strtoupper($method), ['GET', 'HEAD', 'OPTIONS'], true) ? self::LEVEL_READ : self::LEVEL_WRITE;
     }
 
+    /**
+     * آیا سطح موجود ($actual) سطح لازم ($required) را پوشش می‌دهد؟
+     * write (۲) شامل read (۱) هم هست؛ read فقط read را پوشش می‌دهد.
+     */
+    public static function levelCovers(int $required, int $actual): bool
+    {
+        return $actual >= $required;
+    }
+
     public static function levelKey(int $level): string
     {
         return array_search($level, self::LEVELS, true) ?: 'read';

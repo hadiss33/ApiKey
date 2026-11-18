@@ -2,285 +2,251 @@
 
 namespace App\Services\ApiKey\Application\Services;
 
+use App\Services\ApiKey\Application\Contracts\CategoryStore;
 use App\Services\ApiKey\Application\DTOs\ApiKeyRecord;
 use App\Services\ApiKey\Domain\ApiKeyException;
 use App\Services\ApiKey\Domain\ApiKeyRules;
-use Illuminate\Support\Facades\Log;
 
 /**
- * دسته‌بندی دسترسی‌ها از config (api_key.categories / groups / presets). جدول دیتابیس ندارند؛
- * جدول api_key_grants فقط (شناسه‌ی دسته، سطح) هر کلید را نگه می‌دارد.
+ * رجیستری دسته‌ها از دیتابیس (به‌ازای هر شعبه).
  *
- * هر «دسته» یک prefix مسیر است. route با «دقیق‌ترین prefix» (بیشترین بخش مشترک از ابتدا) به دسته می‌رود،
- * و سطح لازم از متد HTTP می‌آید: GET/HEAD = read، بقیه = write. route بدون دسته برای کلید بسته است.
- * دسته‌ی منسوخ (active=false) هم در تطبیق شرکت می‌کند و رد می‌کند (تا route به دسته‌ی کلی‌تر برنگردد).
+ * منطق مجوز (نسخه‌ی جدید — اجتماعی، نه دقیق‌ترین prefix):
+ *   ۱. قانون‌های جمع‌شده‌ی کلید (prefix → حداکثر سطح) ساخته می‌شوند.
+ *   ۲. برای مسیر route از بلندترین prefix به کوتاه‌ترین می‌رویم.
+ *   ۳. اولین قانون با سطح کافی = مجاز.
+ *   ۴. write (۲) شامل read (۱) هم هست.
+ *   ۵. مسیر در «هرگز» باشد → ۴۰۳، بدون توجه به دسته.
+ *
+ * دسته‌ی غیرفعال (is_active=false) شامل هیچ route‌ای نمی‌شود و به دسته‌ی کلی‌تر برنمی‌گردد.
  */
 final class CategoryRegistry
 {
-    /** @var array<int, array<string, mixed>>|null */
-    private ?array $categories = null;
+    public function __construct(
+        private readonly CategoryStore $store,
+    ) {}
 
-    /** @var array<int, array<string, mixed>>|null  بلندترین prefix اول */
-    private ?array $bySpecificity = null;
+    // ─────────────────────── API پنل ───────────────────────
 
-    /** @return array<int, array<string, mixed>> */
-    public function all(): array
+    /** @return array<int, array{...}> */
+    public function listForBranch(int $branchId): array
     {
-        if ($this->categories !== null) {
-            return $this->categories;
+        return $this->store->listForBranch($branchId);
+    }
+
+    public function findForBranch(int $id, int $branchId): ?array
+    {
+        return $this->store->find($id, $branchId);
+    }
+
+    /**
+     * اعتبارسنجی و ساخت دسته.
+     *
+     * @param  array<int, array{prefix:string, level:string}>  $rules
+     */
+    public function create(int $branchId, string $name, array $rules, int $operatorId): array
+    {
+        $this->validateRules($rules, $branchId);
+
+        return $this->store->create($branchId, trim($name), $rules, $operatorId);
+    }
+
+    /**
+     * ویرایش دسته.
+     *
+     * @param  array{name?:string, is_active?:bool, rules?:array<int,array{prefix:string,level:string}>}  $data
+     */
+    public function update(int $id, int $branchId, array $data): array
+    {
+        if (isset($data['rules'])) {
+            $this->validateRules($data['rules'], $branchId, $id);
         }
 
-        $categories = [];
-        $keys = [];
-        $prefixes = [];
+        $result = $this->store->update($id, $branchId, $data);
 
-        foreach ((array) config('api_key.categories', []) as $id => $def) {
-            $key = is_array($def) ? (string) ($def['key'] ?? '') : '';
-            $segments = ApiKeyRules::segments((string) ($def['prefix'] ?? ''));
-            $prefix = implode('/', $segments);
-            $levels = $this->levels((array) ($def['levels'] ?? []));
+        // کش همه‌ی کلیدهای وصل‌شده باید پاک شود (در ApiKeyService انجام می‌شود)
+        return $result;
+    }
 
-            if (! is_int($id) || $id <= 0 || $id > 65535 || ! preg_match('/^[a-z][a-z0-9_]*$/', $key)
-                || $segments === [] || $levels === [] || isset($keys[$key]) || isset($prefixes[$prefix])) {
-                Log::warning('ApiKey: invalid or duplicate category definition skipped', ['id' => $id, 'key' => $key, 'prefix' => $prefix]);
+    public function keyCount(int $id): int
+    {
+        return $this->store->keyCount($id);
+    }
 
+    public function hasKeys(int $id): bool
+    {
+        return $this->store->hasKeys($id);
+    }
+
+    // ─────────────────────── احراز هویت درخواست ───────────────────────
+
+    /**
+     * ساخت قانون‌های جمع‌شده برای یک کلید.
+     * شناسه‌های دسته‌ها از DB خوانده می‌شوند؛ prefix → حداکثر سطح.
+     *
+     * @param  array<int, int>  $categoryIds  شناسه‌های دسته‌های کلید
+     * @return array<string, int>  prefix → LEVEL_READ|LEVEL_WRITE
+     */
+    public function buildAggregatedRules(array $categoryIds): array
+    {
+        if ($categoryIds === []) {
+            return [];
+        }
+
+        $categories = $this->store->findMany($categoryIds);
+        $rules = [];
+
+        foreach ($categories as $cat) {
+            if (! $cat['is_active']) {
                 continue;
             }
 
-            $keys[$key] = true;
-            $prefixes[$prefix] = true;
-            $categories[$id] = [
-                'id' => $id,
-                'key' => $key,
-                'group' => (string) ($def['group'] ?? $key),
-                'label' => (string) ($def['label'] ?? $key),
-                'prefix' => $prefix,
-                'segments' => $segments,
-                'levels' => $levels,
-                'active' => (bool) ($def['active'] ?? true),
-            ];
-        }
-
-        return $this->categories = $categories;
-    }
-
-    public function byKey(string $key): ?array
-    {
-        foreach ($this->all() as $category) {
-            if ($category['key'] === $key) {
-                return $category;
+            foreach ($cat['rules'] as $rule) {
+                $prefix = $rule['prefix'];
+                $level = ApiKeyRules::LEVELS[$rule['level']] ?? ApiKeyRules::LEVEL_READ;
+                // اجتماع: بیشترین سطح برنده است
+                $rules[$prefix] = max($rules[$prefix] ?? 0, $level);
             }
         }
 
-        return null;
+        return $rules;
     }
 
     /**
-     * دسته‌ی یک route از روی «الگوی آدرس» (route->uri()، مثل api/v2/system-log/errors/{ref}): دقیق‌ترین prefix.
-     * بدون دسته ← null.
-     */
-    public function resolve(string $uri): ?array
-    {
-        $segments = ApiKeyRules::segments($uri);
-
-        foreach ($this->specificity() as $category) {
-            if (ApiKeyRules::hasPrefix($segments, $category['segments'])) {
-                return $category;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * مجوز یک درخواست کلید: دسته‌ی route ← سطح از متد ← دسترسی کلید ← (کلید عمومی) public بودن آن سطح.
+     * مجوز یک درخواست کلید.
+     * $aggregatedRules: prefix → سطح (از PreparedKey؛ قبلاً build شده و کش است).
+     *
+     * @param  array<string, int>  $aggregatedRules
      *
      * @throws ApiKeyException scopeDenied
      */
-    public function authorize(ApiKeyRecord $key, string $uri, string $method): void
+    public function authorize(array $aggregatedRules, string $uri, string $method, bool $isPublic): void
     {
-        $category = $this->resolve($uri);
-
-        if ($category === null || ! $category['active']) {
-            throw ApiKeyException::scopeDenied();                     // route برای کلید باز نیست
-        }
-
-        $level = ApiKeyRules::levelForMethod($method);
-        $levelKey = ApiKeyRules::levelKey($level);
-
-        if (! isset($category['levels'][$levelKey])) {
-            throw ApiKeyException::scopeDenied();                     // این دسته آن سطح را ندارد (مثلاً ingest فقط write دارد)
-        }
-
-        if (! in_array($level, $key->grants[$category['id']] ?? [], true)) {
-            throw ApiKeyException::scopeDenied(['category' => $category['key'], 'level' => $levelKey]);
-        }
-
-        if ($key->isPublic() && ! $category['levels'][$levelKey]['public']) {
+        // مسیرهای هرگز
+        if ($this->isNever($uri)) {
             throw ApiKeyException::scopeDenied();
         }
+
+        $required = ApiKeyRules::levelForMethod($method);
+        $uriSegments = ApiKeyRules::segments($uri);
+
+        // قانون‌ها را از بلندترین prefix به کوتاه‌ترین مرتب می‌کنیم
+        $sorted = $aggregatedRules;
+        uksort($sorted, fn (string $a, string $b) => count(ApiKeyRules::segments($b)) <=> count(ApiKeyRules::segments($a)));
+
+        foreach ($sorted as $prefix => $level) {
+            if (! ApiKeyRules::hasPrefix($uriSegments, ApiKeyRules::segments($prefix))) {
+                continue;
+            }
+
+            // write (۲) >= read (۱): write شامل read هم هست
+            if (ApiKeyRules::levelCovers($required, $level)) {
+                // کلید عمومی فقط read می‌تواند داشته باشد
+                if ($isPublic && $required === ApiKeyRules::LEVEL_WRITE) {
+                    throw ApiKeyException::scopeDenied(['category' => $prefix, 'level' => ApiKeyRules::levelKey($required)]);
+                }
+
+                return; // مجاز
+            }
+        }
+
+        // هیچ قانونی نخورد یا سطح کافی نداشت
+        throw ApiKeyException::scopeDenied();
     }
 
     /**
-     * اعتبارسنجی انتخاب‌ها (+ قالب اختیاری) هنگام ساخت/ویرایش کلید.
+     * اعتبارسنجی categoryIds برای ساخت/ویرایش کلید.
      *
-     * @param  array<string, mixed>  $grants  {"system_log": ["read","write"], ...}
-     * @return array<int, array<int, int>> شناسه‌ی دسته ← شناسه‌ی سطح‌ها
+     * @param  array<int, int>  $categoryIds
+     * @return array<int, int>
      *
      * @throws ApiKeyException
      */
-    public function validateGrants(array $grants, ?string $preset, bool $public): array
+    public function validateCategoryIds(array $categoryIds, int $branchId, bool $isPublic): array
     {
-        if ($preset !== null && $preset !== '') {
-            $def = config('api_key.presets.' . $preset);
-
-            if (! is_array($def)) {
-                throw ApiKeyException::invalid('api_key.errors.unknown_preset', 'preset');
-            }
-
-            foreach ((array) ($def['grants'] ?? []) as $categoryKey => $levels) {
-                $grants[$categoryKey] = array_merge((array) ($grants[$categoryKey] ?? []), (array) $levels);
-            }
+        if ($categoryIds === []) {
+            throw ApiKeyException::invalid('api_key.errors.grants_required', 'categories');
         }
 
-        $clean = [];
+        $categories = $this->store->findMany($categoryIds);
 
-        foreach ($grants as $categoryKey => $levels) {
-            $category = $this->byKey((string) $categoryKey);
+        foreach ($categoryIds as $id) {
+            $cat = $categories[$id] ?? null;
 
-            if ($category === null || ! $category['active']) {
-                throw ApiKeyException::invalid('api_key.errors.unknown_category', 'grants');
+            if ($cat === null || (int) $cat['branch_id'] !== $branchId) {
+                throw ApiKeyException::invalid('api_key.errors.unknown_category', 'categories');
             }
 
-            foreach ((array) $levels as $levelName) {
-                $levelId = ApiKeyRules::LEVELS[(string) $levelName] ?? null;
+            if (! $cat['is_active']) {
+                throw ApiKeyException::invalid('api_key.errors.unknown_category', 'categories');
+            }
 
-                if ($levelId === null || ! isset($category['levels'][$levelName])) {
-                    throw ApiKeyException::invalid('api_key.errors.unknown_level', 'grants');
+            if ($isPublic) {
+                foreach ($cat['rules'] as $rule) {
+                    if ($rule['level'] === 'write') {
+                        throw ApiKeyException::invalid('api_key.errors.level_not_public', 'categories');
+                    }
                 }
+            }
+        }
 
-                if ($public && ! $category['levels'][$levelName]['public']) {
-                    throw ApiKeyException::invalid('api_key.errors.level_not_public', 'grants');
+        return array_values(array_unique($categoryIds));
+    }
+
+    // ─────────────────────── کمکی ───────────────────────
+
+    private function isNever(string $uri): bool
+    {
+        $segments = ApiKeyRules::segments($uri);
+
+        foreach ((array) config('api_key.never', []) as $never) {
+            if (ApiKeyRules::hasPrefix($segments, ApiKeyRules::segments((string) $never))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * اعتبارسنجی قانون‌ها برای ساخت/ویرایش دسته.
+     *
+     * @param  array<int, array{prefix:string, level:string}>  $rules
+     */
+    private function validateRules(array $rules, int $branchId, ?int $excludeCategoryId = null): void
+    {
+        if ($rules === []) {
+            throw ApiKeyException::invalid('api_key.errors.category_rules_required', 'rules');
+        }
+
+        $never = (array) config('api_key.never', []);
+        $seenPrefixes = [];
+
+        foreach ($rules as $rule) {
+            $prefix = trim((string) ($rule['prefix'] ?? ''), '/');
+            $level = (string) ($rule['level'] ?? '');
+
+            if ($prefix === '') {
+                throw ApiKeyException::invalid('api_key.errors.invalid_prefix', 'rules');
+            }
+
+            if (! in_array($level, ['read', 'write'], true)) {
+                throw ApiKeyException::invalid('api_key.errors.unknown_level', 'rules');
+            }
+
+            // prefix نباید در «هرگز» باشد
+            $prefixSegments = ApiKeyRules::segments($prefix);
+
+            foreach ($never as $n) {
+                if (ApiKeyRules::hasPrefix($prefixSegments, ApiKeyRules::segments((string) $n))) {
+                    throw ApiKeyException::invalid('api_key.errors.prefix_forbidden', 'rules');
                 }
-
-                $clean[$category['id']][$levelId] = $levelId;
-            }
-        }
-
-        if ($clean === []) {
-            throw ApiKeyException::invalid('api_key.errors.grants_required', 'grants');
-        }
-
-        ksort($clean);
-
-        return array_map(fn (array $levels) => array_values($levels), $clean);
-    }
-
-    /**
-     * خروجی خوانا: {"system_log": ["read","write"]} (دسته‌ی منسوخ/ناموجود حذف می‌شود).
-     *
-     * @param  array<int, array<int, int>>  $grants
-     * @return array<string, array<int, string>>
-     */
-    public function grantKeys(array $grants): array
-    {
-        $all = $this->all();
-        $out = [];
-
-        foreach ($grants as $categoryId => $levels) {
-            if (isset($all[$categoryId]) && $all[$categoryId]['active']) {
-                $out[$all[$categoryId]['key']] = array_values(array_map(fn (int $l) => ApiKeyRules::levelKey($l), $levels));
-            }
-        }
-
-        return $out;
-    }
-
-    /**
-     * کاتالوگ برای پنل: گروه‌ها ← دسته‌ها (با prefix و سطح‌های موجود) + قالب‌ها؛ برچسب‌ها ترجمه‌شده.
-     *
-     * @return array{groups: array<int, array<string, mixed>>, presets: array<int, array<string, mixed>>}
-     */
-    public function catalog(): array
-    {
-        $groupDefs = (array) config('api_key.groups', []);
-        $groups = [];
-
-        foreach ($this->all() as $category) {
-            if (! $category['active']) {
-                continue;
             }
 
-            $name = $category['group'];
-            $groups[$name] ??= [
-                'key' => $name,
-                'title' => __((string) ($groupDefs[$name]['label'] ?? $name)),
-                'order' => (int) ($groupDefs[$name]['order'] ?? 999),
-                'categories' => [],
-            ];
-            $groups[$name]['categories'][] = [
-                'id' => $category['id'],
-                'key' => $category['key'],
-                'title' => __($category['label']),
-                'prefix' => $category['prefix'],
-                'levels' => array_values(array_map(
-                    fn (string $name, array $meta) => ['key' => $name, 'id' => ApiKeyRules::LEVELS[$name], 'public' => $meta['public'], 'danger' => $meta['danger']],
-                    array_keys($category['levels']),
-                    $category['levels'],
-                )),
-            ];
-        }
-
-        uasort($groups, fn (array $a, array $b) => $a['order'] <=> $b['order']);
-
-        $presets = [];
-
-        foreach ((array) config('api_key.presets', []) as $key => $def) {
-            $presets[] = [
-                'key' => (string) $key,
-                'title' => __((string) ($def['label'] ?? $key)),
-                'grants' => (array) ($def['grants'] ?? []),
-            ];
-        }
-
-        return [
-            'groups' => array_values(array_map(function (array $g) {
-                unset($g['order']);
-
-                return $g;
-            }, $groups)),
-            'presets' => $presets,
-        ];
-    }
-
-    /**
-     * @param  array<string, mixed>  $levels  نام سطح ← تنظیمات ['public' => bool, 'danger' => bool]
-     * @return array<string, array{public: bool, danger: bool}>
-     */
-    private function levels(array $levels): array
-    {
-        $out = [];
-
-        foreach ($levels as $name => $meta) {
-            if (! isset(ApiKeyRules::LEVELS[$name])) {
-                continue;
+            if (isset($seenPrefixes[$prefix])) {
+                throw ApiKeyException::invalid('api_key.errors.duplicate_prefix', 'rules');
             }
 
-            $out[$name] = ['public' => (bool) ($meta['public'] ?? false), 'danger' => (bool) ($meta['danger'] ?? false)];
+            $seenPrefixes[$prefix] = true;
         }
-
-        return $out;
-    }
-
-    /** @return array<int, array<string, mixed>> */
-    private function specificity(): array
-    {
-        if ($this->bySpecificity === null) {
-            $list = array_values($this->all());
-            usort($list, fn (array $a, array $b) => count($b['segments']) <=> count($a['segments']));
-            $this->bySpecificity = $list;
-        }
-
-        return $this->bySpecificity;
     }
 }

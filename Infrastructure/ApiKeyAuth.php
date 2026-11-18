@@ -2,8 +2,9 @@
 
 namespace App\Services\ApiKey\Infrastructure;
 
-use App\Services\ApiKey\Application\Contracts\OperatorDirectory;
+use App\Http\Middleware\AuthGuest;
 use App\Services\ApiKey\Application\Contracts\PathSecurity;
+use App\Services\ApiKey\Application\DTOs\PreparedKey;
 use App\Services\ApiKey\Application\Services\ApiKeyService;
 use App\Services\ApiKey\Application\Services\CategoryRegistry;
 use App\Services\ApiKey\Domain\ApiKeyException;
@@ -15,24 +16,22 @@ use Illuminate\Support\Facades\RateLimiter;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * احراز هویت و مجوز درخواستِ دارای کلید API؛ جای DomainAccess + IpTrust + AuthWithJWT
- * (ReplacePanelAuth آن سه را برای همین route کنار می‌گذارد و این میدلور را می‌گذارد).
+ * احراز هویت و مجوز درخواستِ دارای کلید API.
+ * جای DomainAccess + IpTrust + AuthWithJWT + AuthGuest.
  *
- *   هویت  : کلید معتبر، باطل/منقضی نباشد، IP/Origin مجاز (جای اعتماد IP در IpTrust)
- *   مجوز  : prefix route ← دسته در config ← سطح از متد (GET=read، بقیه=write) ← دسترسی کلید
- *   امنیت مسیر: همان بررسی IpTrust (PathSecurity)
- *   attribute: branch/office (جای DomainAccess؛ هدر Domain نادیده است)،
- *              group/level/operator (جای AuthWithJWT؛ اپراتور سازنده‌ی کلید، فعال بودنش شرط است)،
- *              api_key (هویت کلید برای ثبت در رکوردها: ApiKeyContext)
- *
- * هر خطا ← پاسخ error با همان قالب پروژه؛ هرگز route بدون احراز باز نمی‌ماند.
+ *   هویت       : PreparedKey (رکورد + قانون‌های جمع‌شده + اپراتور پاک)
+ *   مجوز        : prefix route ← قانون‌های اجتماعی (بلندترین ← کوتاه‌ترین، write شامل read)
+ *   مسیر ممنوع : «هرگز» در config
+ *   امنیت مسیر : PathSecurity (جای IpTrust)
+ *   attribute   : branch/office (از کلید، نه هدر Domain)،
+ *                 group/level/operator (اپراتور پاک‌سازی‌شده)،
+ *                 api_key (هویت کلید برای ثبت در رکوردها)
  */
 final class ApiKeyAuth
 {
     public function __construct(
         private readonly ApiKeyService $keys,
         private readonly CategoryRegistry $categories,
-        private readonly OperatorDirectory $operators,
         private readonly PathSecurity $paths,
     ) {}
 
@@ -52,16 +51,28 @@ final class ApiKeyAuth
         }
 
         try {
-            $record = $this->keys->authenticate($plain, $ip, $request->headers->get('Origin'));
-            $this->categories->authorize($record, (string) $request->route()?->uri(), $request->getMethod());
+            /** @var PreparedKey $prepared */
+            $prepared = $this->keys->authenticate($plain, $ip, $request->headers->get('Origin'));
+            $record = $prepared->record;
 
+            // مجوز route (منطق اجتماعی + هرگز)
+            $this->categories->authorize(
+                $prepared->aggregatedRules,
+                (string) $request->route()?->uri(),
+                $request->getMethod(),
+                $record->isPublic(),
+            );
+
+            // بررسی امنیت مسیر (جای PathSecurity در IpTrust)
             if (! $this->paths->allowed($request->path())) {
                 throw ApiKeyException::sourceDenied();
             }
 
-            $operator = $this->operators->activeOperator($record->createdBy) ?? throw ApiKeyException::creatorInactive();
+            // کلید test: سوییچ به دیتابیس/Redis demo (مثل DomainAccess)
+            if ($record->environment === ApiKeyRules::ENV_TEST) {
+                $this->switchToDemo($request);
+            }
         } catch (ApiKeyException $e) {
-            // فقط «کلید نامعتبر» شمرده می‌شود (حدس‌زدن کلید)، نه دسترسی/اپراتور
             if ($e->errorCode === 4010) {
                 RateLimiter::hit($failKey, max(60, (int) config('api_key.failures.decay_seconds', 600)));
             }
@@ -69,6 +80,7 @@ final class ApiKeyAuth
             return $this->error($e);
         }
 
+        $operator = $prepared->sanitizedOperator;
         $limit = $record->rateLimitPerMinute ?? (int) config('api_key.rate_limit.' . ApiKeyRules::typeKey($record->type), 60);
         $rateKey = 'api_key:rate:' . $record->id;
 
@@ -97,6 +109,19 @@ final class ApiKeyAuth
         $ip = function_exists('getIp') ? getIp() : $request->ip();
 
         return filter_var($ip, FILTER_VALIDATE_IP) ?: null;
+    }
+
+    /** سوییچ اتصال DB/Redis به demo (مثل DomainAccess برای domain های demo) */
+    private function switchToDemo(Request $request): void
+    {
+        try {
+            if (config('database.default') !== 'mysql_demo') {
+                config(['database.default' => 'mysql_demo']);
+                \Illuminate\Support\Facades\DB::purge('mysql');
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('ApiKey: demo DB switch failed', ['error' => $e->getMessage()]);
+        }
     }
 
     private function error(ApiKeyException $e): JsonResponse

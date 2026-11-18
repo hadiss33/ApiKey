@@ -35,19 +35,19 @@ interface ApiKeyStore
 
     /**
      * @param  array<string, mixed>  $attributes  ستون‌های api_keys
-     * @param  array<int, array<int, int>>  $grants  شناسه‌ی دسته ← سطح‌ها
+     * @param  array<int, int>  $categoryIds  شناسه‌های دسته‌ها
      * @param  array<int, string>  $origins
      */
-    public function create(array $attributes, array $grants, array $origins): ApiKeyRecord;
+    public function create(array $attributes, array $categoryIds, array $origins): ApiKeyRecord;
 
     /**
-     * ویرایش؛ $grants/$origins اگر null باشند دست نمی‌خورند.
+     * ویرایش؛ $categoryIds/$origins اگر null باشند دست نمی‌خورند.
      *
      * @param  array<string, mixed>  $attributes
-     * @param  array<int, array<int, int>>|null  $grants
+     * @param  array<int, int>|null  $categoryIds
      * @param  array<int, string>|null  $origins
      */
-    public function update(int $id, array $attributes, ?array $grants = null, ?array $origins = null): ApiKeyRecord;
+    public function update(int $id, array $attributes, ?array $categoryIds = null, ?array $origins = null): ApiKeyRecord;
 
     /** ثبت آخرین استفاده (بدون عوض‌کردن updated_at) */
     public function touch(int $id, ?string $ip, DateTimeInterface $at): void;

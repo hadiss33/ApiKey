@@ -5,7 +5,7 @@ namespace App\Services\ApiKey\Infrastructure;
 use App\Services\ApiKey\Application\Contracts\ApiKeyStore;
 use App\Services\ApiKey\Application\DTOs\ApiKeyRecord;
 use App\Services\ApiKey\Infrastructure\Models\ApiKey;
-use App\Services\ApiKey\Infrastructure\Models\ApiKeyGrant;
+use App\Services\ApiKey\Infrastructure\Models\ApiKeyCategoryKey;
 use App\Services\ApiKey\Infrastructure\Models\ApiKeyOrigin;
 use App\Services\ApiKey\Domain\ApiKeyException;
 use DateTimeInterface;
@@ -15,7 +15,7 @@ use RuntimeException;
 /** ذخیره‌ی کلیدها با Eloquent (بدون DB:: خام) + hash کلید با HMAC-SHA256. */
 final class EloquentApiKeyStore implements ApiKeyStore
 {
-    private const RELATIONS = ['grantRows', 'origins'];
+    private const RELATIONS = ['categoryKeys', 'origins'];
 
     public function hash(string $plainKey): string
     {
@@ -76,25 +76,25 @@ final class EloquentApiKeyStore implements ApiKeyStore
             ->all();
     }
 
-    public function create(array $attributes, array $grants, array $origins): ApiKeyRecord
+    public function create(array $attributes, array $categoryIds, array $origins): ApiKeyRecord
     {
-        return $this->transaction(function () use ($attributes, $grants, $origins) {
+        return $this->transaction(function () use ($attributes, $categoryIds, $origins) {
             $key = ApiKey::query()->create($attributes);
-            $this->syncGrants($key->id, $grants);
+            $this->syncCategoryKeys($key->id, $categoryIds);
             $this->syncOrigins($key->id, $origins);
 
             return $key->load(self::RELATIONS)->toRecord();
         });
     }
 
-    public function update(int $id, array $attributes, ?array $grants = null, ?array $origins = null): ApiKeyRecord
+    public function update(int $id, array $attributes, ?array $categoryIds = null, ?array $origins = null): ApiKeyRecord
     {
-        return $this->transaction(function () use ($id, $attributes, $grants, $origins) {
+        return $this->transaction(function () use ($id, $attributes, $categoryIds, $origins) {
             $key = ApiKey::query()->lockForUpdate()->findOrFail($id);
             $key->fill($attributes)->save();
 
-            if ($grants !== null) {
-                $this->syncGrants($key->id, $grants);
+            if ($categoryIds !== null) {
+                $this->syncCategoryKeys($key->id, $categoryIds);
             }
 
             if ($origins !== null) {
@@ -113,21 +113,19 @@ final class EloquentApiKeyStore implements ApiKeyStore
         ]);
     }
 
-    /** @param  array<int, array<int, int>>  $grants  شناسه‌ی دسته ← سطح‌ها */
-    private function syncGrants(int $keyId, array $grants): void
+    /** @param  array<int, int>  $categoryIds  شناسه‌های دسته‌ها */
+    private function syncCategoryKeys(int $keyId, array $categoryIds): void
     {
-        ApiKeyGrant::query()->where('api_key_id', $keyId)->delete();
+        ApiKeyCategoryKey::query()->where('api_key_id', $keyId)->delete();
 
         $rows = [];
 
-        foreach ($grants as $categoryId => $levels) {
-            foreach ($levels as $level) {
-                $rows[] = ['api_key_id' => $keyId, 'category_id' => (int) $categoryId, 'level' => (int) $level];
-            }
+        foreach (array_unique($categoryIds) as $categoryId) {
+            $rows[] = ['api_key_id' => $keyId, 'category_id' => (int) $categoryId];
         }
 
         if ($rows !== []) {
-            ApiKeyGrant::query()->insert($rows);
+            ApiKeyCategoryKey::query()->insert($rows);
         }
     }
 

@@ -40,10 +40,10 @@ class ApiKey extends Model
         'revoked_by' => 'integer',
     ];
 
-    /** ردیف‌های جدول رابط (دسته و سطح؛ شناسه‌ی دسته از config) */
-    public function grantRows(): HasMany
+    /** ردیف‌های جدول رابط کلید ↔ دسته */
+    public function categoryKeys(): HasMany
     {
-        return $this->hasMany(ApiKeyGrant::class, 'api_key_id');
+        return $this->hasMany(ApiKeyCategoryKey::class, 'api_key_id');
     }
 
     public function origins(): HasMany
@@ -65,11 +65,7 @@ class ApiKey extends Model
             keyHash: (string) $this->key_hash,
             previousKeyHash: $this->previous_key_hash,
             previousKeyExpiresAt: $this->previous_key_expires_at,
-            grants: $this->grantRows
-                ->groupBy('category_id')
-                ->map(fn ($rows) => $rows->pluck('level')->map(fn ($l) => (int) $l)->sort()->values()->all())
-                ->sortKeys()
-                ->all(),
+            categoryIds: $this->categoryKeys->pluck('category_id')->map(fn ($id) => (int) $id)->sort()->values()->all(),
             allowedIps: array_values((array) ($this->allowed_ips ?? [])),
             origins: $this->origins->pluck('origin')->sort()->values()->all(),
             rateLimitPerMinute: $this->rate_limit_per_minute,
