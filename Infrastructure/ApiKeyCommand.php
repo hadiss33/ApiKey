@@ -12,11 +12,11 @@ use Illuminate\Console\Command;
 /**
  * مدیریت کلید از خط فرمان (تست و break-glass). پیام‌ها انگلیسی (ابزار کنسول).
  *
- *   php artisan api-key list   --branch=1
- *   php artisan api-key create --branch=1 --operator=5 --name="Shop server" --grants=system_log:read,system_log:write
- *                              [--preset=system_log_full] [--type=public --origins=https://a.ir] [--ips=1.2.3.4] [--days=30|--no-expiry] [--env=test]
- *   php artisan api-key revoke --branch=1 --operator=5 --id=7
- *   php artisan api-key categories
+ *   php artisan api-key list       --branch=1
+ *   php artisan api-key categories --branch=1
+ *   php artisan api-key create     --branch=1 --operator=5 --name="Shop server" --categories=3,4
+ *                                  [--type=public --origins=https://a.ir] [--ips=1.2.3.4] [--days=30|--no-expiry] [--env=test]
+ *   php artisan api-key revoke     --branch=1 --operator=5 --id=7
  */
 class ApiKeyCommand extends Command
 {
@@ -28,8 +28,7 @@ class ApiKeyCommand extends Command
         {--name= : Key name (create)}
         {--type=secret : secret | public}
         {--env=live : live | test}
-        {--grants= : Comma-separated category:level pairs, e.g. system_log:read,system_log:write}
-        {--preset= : Preset name from config}
+        {--categories= : Comma-separated category ids of this branch (see the categories action)}
         {--ips= : Comma-separated IPs/CIDRs}
         {--origins= : Comma-separated origins (public keys)}
         {--days= : Expiry in days}
@@ -41,7 +40,7 @@ class ApiKeyCommand extends Command
     {
         try {
             return match ($this->argument('action')) {
-                'list' => $this->listKeys($keys, $categories),
+                'list' => $this->listKeys($keys),
                 'create' => $this->create($keys),
                 'revoke' => $this->revoke($keys),
                 'categories' => $this->categories($categories),
@@ -52,14 +51,20 @@ class ApiKeyCommand extends Command
         }
     }
 
-    private function listKeys(ApiKeyService $keys, CategoryRegistry $categories): int
+    private function listKeys(ApiKeyService $keys): int
     {
-        $rows = array_map(fn (ApiKeyRecord $k) => [
-            $k->id, $k->name, ApiKeyRules::typeKey($k->type), $k->prefix . '…', $k->status(),
-            $this->grantsText($categories->grantKeys($k->grants)), $k->expiresAt?->format('Y-m-d H:i') ?? '-', $k->lastUsedAt?->format('Y-m-d H:i') ?? '-',
+        $rows = array_map(fn(ApiKeyRecord $k) => [
+            $k->id,
+            $k->name,
+            ApiKeyRules::typeKey($k->type),
+            $k->prefix . '…',
+            $k->status(),
+            implode(',', $k->categoryIds),
+            $k->expiresAt?->format('Y-m-d H:i') ?? '-',
+            $k->lastUsedAt?->format('Y-m-d H:i') ?? '-',
         ], $keys->list($this->requiredInt('branch')));
 
-        $this->table(['id', 'name', 'type', 'prefix', 'status', 'grants', 'expires', 'last used'], $rows);
+        $this->table(['id', 'name', 'type', 'prefix', 'status', 'categories', 'expires', 'last used'], $rows);
 
         return self::SUCCESS;
     }
@@ -70,8 +75,7 @@ class ApiKeyCommand extends Command
             'name' => (string) ($this->option('name') ?: 'CLI key'),
             'type' => (string) $this->option('type'),
             'environment' => (string) $this->option('env'),
-            'grants' => $this->parseGrants(),
-            'preset' => $this->option('preset'),
+            'categories' => array_map('intval', $this->csv('categories')),
             'allowed_ips' => $this->csv('ips'),
             'origins' => $this->csv('origins'),
             'expires_at' => $this->option('days') ? now()->addDays((int) $this->option('days'))->toDateTimeString() : null,
@@ -94,35 +98,16 @@ class ApiKeyCommand extends Command
 
     private function categories(CategoryRegistry $categories): int
     {
-        $this->table(['id', 'key', 'group', 'prefix', 'levels (public)', 'active'], array_map(
-            fn (array $c) => [
-                $c['id'], $c['key'], $c['group'], $c['prefix'],
-                implode(', ', array_map(fn (string $l, array $m) => $l . ($m['public'] ? ' (public)' : '') . ($m['danger'] ? ' (danger)' : ''), array_keys($c['levels']), $c['levels'])),
-                $c['active'] ? 'yes' : 'no',
-            ],
-            array_values($categories->all()),
-        ));
+        $rows = array_map(fn(array $c) => [
+            $c['id'],
+            $c['name'],
+            $c['is_active'] ? 'yes' : 'no',
+            implode(' ', array_map(fn(array $r) => $r['prefix'] . ':' . $r['level'], $c['rules'])),
+        ], $categories->listForBranch($this->requiredInt('branch')));
+
+        $this->table(['id', 'name', 'active', 'rules (prefix:level)'], $rows);
 
         return self::SUCCESS;
-    }
-
-    /** @return array<string, array<int, string>> */
-    private function parseGrants(): array
-    {
-        $grants = [];
-
-        foreach ($this->csv('grants') as $pair) {
-            [$category, $level] = array_pad(explode(':', $pair, 2), 2, '');
-            $grants[$category][] = $level;
-        }
-
-        return $grants;
-    }
-
-    /** @param  array<string, array<int, string>>  $grants */
-    private function grantsText(array $grants): string
-    {
-        return implode(' ', array_map(fn (string $c, array $l) => $c . ':' . implode('+', $l), array_keys($grants), $grants));
     }
 
     private function requiredInt(string $option): int
@@ -139,7 +124,7 @@ class ApiKeyCommand extends Command
     /** @return array<int, string> */
     private function csv(string $option): array
     {
-        return array_values(array_filter(array_map('trim', explode(',', (string) $this->option($option))), fn ($v) => $v !== ''));
+        return array_values(array_filter(array_map('trim', explode(',', (string) $this->option($option))), fn($v) => $v !== ''));
     }
 
     private function failWith(string $message): int

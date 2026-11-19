@@ -92,6 +92,11 @@ final class EloquentCategoryStore implements CategoryStore
         return ApiKeyCategoryKey::query()->where('category_id', $id)->count();
     }
 
+    public function delete(int $id, int $branchId): void
+    {
+        ApiKeyCategory::query()->where('branch_id', $branchId)->where('id', $id)->delete();
+    }
+
     // ─────────────────────── کمکی ───────────────────────
 
     private function toArray(ApiKeyCategory $cat): array

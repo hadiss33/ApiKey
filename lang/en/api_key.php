@@ -2,22 +2,6 @@
 
 return [
 
-    'groups' => [
-        'system_log' => 'System log',
-    ],
-
-    // category = route prefix; levels: read (GET) and write (every other method)
-    'categories' => [
-        'system_log' => 'System log (errors, activity logs, access and categories)',
-        'system_log_ingest' => 'Send errors and activity logs to the system log',
-    ],
-
-    'presets' => [
-        'system_log_frontend' => 'System log: frontend (send errors + view)',
-        'system_log_monitoring' => 'System log: monitoring (read only)',
-        'system_log_full' => 'System log: full access',
-    ],
-
     'auth' => [
         'invalid_key' => 'The API key is invalid.',
         'creator_inactive' => 'The operator who created this key is inactive or removed; the key does not work.',
@@ -29,14 +13,13 @@ return [
 
     'errors' => [
         'forbidden' => 'Only a branch administrator can manage API keys.',
-        'not_found' => 'Key not found.',
+        'not_found' => 'Not found.',
         'invalid_input' => 'The submitted data is invalid.',
         'server_error' => 'An internal error occurred. Please try again.',
-        'unknown_preset' => 'The selected preset does not exist.',
-        'unknown_category' => 'One of the selected categories does not exist or is inactive.',
-        'unknown_level' => 'One of the selected levels does not exist for that category.',
-        'level_not_public' => 'A public key can only have levels allowed for frontends.',
-        'grants_required' => 'Select at least one category with one level (read or write).',
+        'unknown_category' => 'One of the selected categories does not exist, belongs to another branch, or is inactive.',
+        'unknown_level' => 'The selected level is invalid (read or write).',
+        'level_not_public' => 'A public key can only get categories whose rules are all read-only.',
+        'grants_required' => 'Select at least one category.',
         'invalid_type' => 'The key type is invalid.',
         'invalid_environment' => 'The key environment is invalid.',
         'max_keys' => 'Each branch can have at most :max active keys.',
@@ -51,5 +34,15 @@ return [
         'invalid_ip' => 'The IP address ":value" is invalid. Example: 203.0.113.7 or 203.0.113.0/24',
         'invalid_rate_limit' => 'The request limit must be between 1 and :max per minute.',
         'expiry_past' => 'The expiry date must be in the future.',
+
+        // categories
+        'category_rules_required' => 'Each category needs at least one rule (prefix + level).',
+        'too_many_rules' => 'At most :max rules are allowed per category.',
+        'too_many_categories' => 'Each branch can have at most :max categories.',
+        'invalid_prefix' => 'The prefix is empty or invalid.',
+        'prefix_forbidden' => 'This prefix is on the never-allowed list for keys and cannot be used in any category.',
+        'prefix_unknown' => 'The prefix ":value" is not in the list of selectable routes.',
+        'duplicate_prefix' => 'A prefix can appear only once in a category.',
+        'category_has_keys' => 'This category is attached to keys and cannot be deleted. Deactivate it or detach it from the keys first.',
     ],
 ];

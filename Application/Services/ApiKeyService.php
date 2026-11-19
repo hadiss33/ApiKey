@@ -229,6 +229,14 @@ final class ApiKeyService
         return $prepared;
     }
 
+    /** کش «کلید آماده» همه‌ی کلیدهای وصل‌شده به این دسته را پاک می‌کند (بعد از ویرایش دسته صدا زده می‌شود). */
+    public function forgetCategory(int $categoryId): void
+    {
+        foreach ($this->store->listByCategory($categoryId) as $record) {
+            $this->forget($record);
+        }
+    }
+
     public function touch(ApiKeyRecord $record, ?string $ip): void
     {
         try {

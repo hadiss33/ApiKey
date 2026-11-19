@@ -8,14 +8,14 @@ use Illuminate\Http\Exceptions\HttpResponseException;
 
 /**
  * اعتبارسنجی شکل ورودی پنل کلیدها؛ قوانین بر اساس متد کنترلر (store / update / rotate).
- * قانون‌های کسب‌وکار (دسترسی‌ها با config، یکتایی دامنه، سقف کلید، ...) در ApiKeyService.
- * خطا با قالب error (کد 4220، HTTP 422)؛ بدون این، هندلر کلی پروژه ValidationException را ۵۰۰ می‌کند.
+ * قانون‌های کسب‌وکار (دسته‌ها: شعبه/فعال/عمومی، یکتایی دامنه، سقف کلید، ...) در ApiKeyService و CategoryRegistry.
+ * خطا با قالب error (کد 4220، HTTP 422).
  */
 class ApiKeyRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true; // دسترسی (اپراتور ادمین شعبه) در کنترلر
+        return true; // دسترسی (اپراتور ادمین شعبه) در PanelGuard
     }
 
     public function rules(): array
@@ -37,11 +37,9 @@ class ApiKeyRequest extends FormRequest
             'description' => ['sometimes', 'nullable', 'string', 'max:500'],
             'type' => [$create ? 'required' : 'prohibited', 'string', 'in:secret,public'],
             'environment' => [$create ? 'sometimes' : 'prohibited', 'string', 'in:live,test'],
-            // {"system_log": ["read", "write"], ...}؛ وجود دسته و سطح و عمومی‌بودنش در CategoryRegistry
-            'grants' => ['sometimes', 'array', 'max:100'],
-            'grants.*' => ['array', 'max:2'],
-            'grants.*.*' => ['string', 'in:read,write'],
-            'preset' => ['sometimes', 'nullable', 'string', 'max:64'],
+            // شناسه‌ی دسته‌ها؛ تعلق به شعبه، فعال‌بودن و مناسب‌بودن برای کلید عمومی در CategoryRegistry
+            'categories' => [$required, 'array', 'min:1', 'max:50'],
+            'categories.*' => ['integer', 'min:1'],
             'allowed_ips' => ['sometimes', 'nullable', 'array', 'max:50'],
             'allowed_ips.*' => ['string', 'max:64'],
             'origins' => ['sometimes', 'nullable', 'array', 'max:20'],

@@ -48,4 +48,7 @@ interface CategoryStore
 
     /** تعداد کلیدهای وصل‌شده به این دسته */
     public function keyCount(int $id): int;
+
+    /** حذف فیزیکی؛ فراخوان باید قبلش hasKeys را بررسی کرده باشد */
+    public function delete(int $id, int $branchId): void;
 }

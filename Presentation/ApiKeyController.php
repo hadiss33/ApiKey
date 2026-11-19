@@ -7,29 +7,24 @@ use App\Jobs\SystemLog;
 use App\Services\ApiKey\Application\DTOs\ApiKeyRecord;
 use App\Services\ApiKey\Application\Services\ApiKeyService;
 use App\Services\ApiKey\Application\Services\CategoryRegistry;
-use App\Services\ApiKey\Domain\ApiKeyException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Http\Resources\Json\JsonResource;
 use Throwable;
 
 /**
  * پنل کلیدهای API (api/v2/api-keys). فقط اپراتور (گروه base) با is_admin، و فقط کلیدهای «شعبه‌ی request خودش».
  * شعبه و اپراتور فقط از attribute میدلورها خوانده می‌شوند. خروجی: items | payload | error | empty (+ meta.timestamp).
  * عملیات نوشتن در لاگ فعالیت SystemLog ثبت می‌شود (بدون کلید خام).
+ * کاتالوگ دسته‌ها دیگر اینجا نیست: CategoryController (categories و categories/tree).
  */
 class ApiKeyController extends Controller
 {
+    use PanelGuard;
+
     public function __construct(
         private readonly ApiKeyService $keys,
         private readonly CategoryRegistry $categories,
     ) {}
-
-    /** کاتالوگ دسته‌ها (گروه‌بندی‌شده، با prefix و سطح‌های هر دسته) و قالب‌ها، از config */
-    public function categories(Request $request): JsonResponse
-    {
-        return $this->guard($request, fn () => $this->payload(JsonResource::make($this->categories->catalog())->resolve()));
-    }
 
     public function index(Request $request): JsonResponse
     {
@@ -42,7 +37,7 @@ class ApiKeyController extends Controller
 
     public function show(Request $request, int $id): JsonResponse
     {
-        return $this->guard($request, fn (int $branch) => $this->key($this->keys->find($branch, $id)));
+        return $this->guard($request, fn(int $branch) => $this->key($this->keys->find($branch, $id)));
     }
 
     public function store(ApiKeyRequest $request): JsonResponse
@@ -86,54 +81,9 @@ class ApiKeyController extends Controller
         });
     }
 
-    // ───────────────────────── کمکی ─────────────────────────
-
-    /** @param  callable(int $branch, int $operator): JsonResponse  $callback */
-    private function guard(Request $request, callable $callback): JsonResponse
-    {
-        try {
-            $operator = $request->attributes->get('operator');
-            $branch = $request->attributes->get('branch');
-
-            if ($request->attributes->get('group') !== 'base' || ! is_object($operator)
-                || (int) ($operator->is_admin ?? 0) !== 1 || ! is_numeric($branch)) {
-                throw ApiKeyException::forbidden();
-            }
-
-            return $callback((int) $branch, (int) $operator->id);
-        } catch (ApiKeyException $e) {
-            return response()->json([
-                'error' => array_filter([
-                    'code' => $e->errorCode,
-                    'message' => __($e->getMessage(), $e->replace),
-                    'fields' => $e->fields === [] ? null : array_map(
-                        fn (array $keys) => array_map(fn ($k) => __($k, $e->replace), $keys),
-                        $e->fields,
-                    ),
-                ], fn ($v) => $v !== null),
-                'meta' => ['timestamp' => time()],
-            ], $e->status);
-        } catch (Throwable $e) {
-            logger()->error('ApiKey: unexpected panel error', ['error' => $e->getMessage(), 'file' => $e->getFile(), 'line' => $e->getLine()]);
-            report($e);
-
-            return response()->json([
-                'error' => ['code' => 5000, 'message' => __('api_key.errors.server_error')],
-                'meta' => ['timestamp' => time()] + (app()->environment('local')
-                    ? ['debug' => ['file' => $e->getFile(), 'line' => $e->getLine(), 'exception' => $e->getMessage()]]
-                    : []),
-            ], 500);
-        }
-    }
-
     private function key(ApiKeyRecord $record, int $status = 200): JsonResponse
     {
         return $this->payload((new ApiKeyResource($record))->resolve(), $status);
-    }
-
-    private function payload(array $payload, int $status = 200): JsonResponse
-    {
-        return response()->json(['payload' => $payload, 'empty' => false, 'meta' => ['timestamp' => time()]], $status);
     }
 
     /** لاگ فعالیت؛ شکستش عملیات را برنمی‌گرداند. کلید خام و hash هرگز در لاگ نمی‌روند. */
@@ -146,7 +96,8 @@ class ApiKeyController extends Controller
                 'data' => [
                     'name' => $record->name,
                     'prefix' => $record->prefix,
-                    'grants' => $this->categories->grantKeys($record->grants),
+                    'categories' => $record->categoryIds,
+                    'effective_access' => $this->categories->effectiveAccess($record->categoryIds),
                     'allowed_ips' => $record->allowedIps,
                     'origins' => $record->origins,
                     'expires_at' => $record->expiresAt?->format(DATE_ATOM),

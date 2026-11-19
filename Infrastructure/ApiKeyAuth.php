@@ -56,10 +56,12 @@ final class ApiKeyAuth
             $record = $prepared->record;
 
             // مجوز route (منطق اجتماعی + هرگز)
+            $route = $request->route();
             $this->categories->authorize(
                 $prepared->aggregatedRules,
-                (string) $request->route()?->uri(),
-                $request->getMethod(),
+                (string) $route?->uri(),
+                $request->path(),
+                $route !== null ? RouteLevel::for($route, $request->getMethod()) : ApiKeyRules::levelForMethod($request->getMethod()),
                 $record->isPublic(),
             );
 

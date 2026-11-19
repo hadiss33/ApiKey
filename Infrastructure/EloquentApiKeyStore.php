@@ -113,6 +113,15 @@ final class EloquentApiKeyStore implements ApiKeyStore
         ]);
     }
 
+    public function listByCategory(int $categoryId): array
+    {
+        return ApiKey::query()->with(self::RELATIONS)
+            ->whereHas('categoryKeys', fn ($q) => $q->where('category_id', $categoryId))
+            ->get()
+            ->map(fn (ApiKey $key) => $key->toRecord())
+            ->all();
+    }
+
     /** @param  array<int, int>  $categoryIds  شناسه‌های دسته‌ها */
     private function syncCategoryKeys(int $keyId, array $categoryIds): void
     {

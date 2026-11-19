@@ -9,6 +9,7 @@ use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
  * خروجی یک کلید برای پنل. hash هرگز بیرون نمی‌آید؛ کلید خام (key) فقط در پاسخ ساخت/چرخش.
+ * categories = شناسه‌ی دسته‌های وصل‌شده؛ effective_access = اجتماع قانون‌های آن‌ها (دقیقاً چه چیزی باز است).
  *
  * @property ApiKeyRecord $resource
  */
@@ -27,7 +28,8 @@ class ApiKeyResource extends JsonResource
             'environment' => ApiKeyRules::environmentKey($k->environment),
             'prefix' => $k->prefix,
             'status' => $k->status(),
-            'grants' => app(CategoryRegistry::class)->grantKeys($k->grants),
+            'categories' => $k->categoryIds,
+            'effective_access' => app(CategoryRegistry::class)->effectiveAccess($k->categoryIds),
             'allowed_ips' => $k->allowedIps,
             'origins' => $k->origins,
             'rate_limit_per_minute' => $k->rateLimitPerMinute,

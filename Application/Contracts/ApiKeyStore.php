@@ -51,4 +51,7 @@ interface ApiKeyStore
 
     /** ثبت آخرین استفاده (بدون عوض‌کردن updated_at) */
     public function touch(int $id, ?string $ip, DateTimeInterface $at): void;
+
+    /** کلیدهای وصل‌شده به یک دسته (برای پاک‌کردن کششان بعد از ویرایش دسته) */
+    public function listByCategory(int $categoryId): array;
 }
